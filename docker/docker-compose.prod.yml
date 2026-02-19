@@ -1,0 +1,192 @@
+version: "3.9"
+
+# IshemaLink Production Stack
+# Deploy on Rwanda local data center (AOS / KtRN) for data sovereignty
+#
+# Services: web, celery_worker, celery_beat, db (postgres), pgbouncer,
+#           redis, nginx, ebm_mock, rura_mock, prometheus, grafana
+
+x-common-env: &common-env
+  DJANGO_SETTINGS_MODULE: ishemalink.settings
+  SECRET_KEY: ${DJANGO_SECRET_KEY}
+  DB_HOST: pgbouncer
+  DB_PORT: 5432
+  DB_NAME: ${DB_NAME:-ishemalink}
+  DB_USER: ${DB_USER:-ishemalink}
+  DB_PASSWORD: ${DB_PASSWORD}
+  REDIS_URL: redis://redis:6379/0
+  DEBUG: "False"
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost}
+  MTN_MOMO_BASE_URL: ${MTN_MOMO_BASE_URL}
+  RRA_EBM_BASE_URL: http://ebm-mock:8001
+  RURA_API_BASE_URL: http://rura-mock:8002
+  SMS_GATEWAY_URL: http://sms-mock:8003
+
+services:
+
+  # ── Application (Gunicorn + Uvicorn ASGI) ──────────────────────────────────
+  web:
+    build:
+      context: .
+      target: production
+    image: ishemalink:latest
+    environment:
+      <<: *common-env
+    volumes:
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+    depends_on:
+      - pgbouncer
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/deep/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - backend
+
+  # ── Celery Worker (async tasks) ────────────────────────────────────────────
+  celery_worker:
+    image: ishemalink:latest
+    command: celery -A ishemalink worker -l info --concurrency=8
+    environment:
+      <<: *common-env
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ── Celery Beat (scheduled tasks) ─────────────────────────────────────────
+  celery_beat:
+    image: ishemalink:latest
+    command: celery -A ishemalink beat -l info
+    environment:
+      <<: *common-env
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-ishemalink}
+      POSTGRES_USER:     ${DB_USER:-ishemalink}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER:-ishemalink}"]
+      interval: 10s
+      retries: 5
+
+  # ── PgBouncer (connection pooling) ────────────────────────────────────────
+  pgbouncer:
+    image: pgbouncer/pgbouncer:latest
+    environment:
+      DATABASES_HOST:     db
+      DATABASES_PORT:     5432
+      DATABASES_USER:     ${DB_USER:-ishemalink}
+      DATABASES_PASSWORD: ${DB_PASSWORD}
+      DATABASES_DBNAME:   ${DB_NAME:-ishemalink}
+      POOL_MODE:          transaction
+      MAX_CLIENT_CONN:    5000
+      DEFAULT_POOL_SIZE:  50
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ── Redis (cache + channels + Celery broker) ───────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ── Nginx (reverse proxy + SSL termination) ────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/ssl/ishemalink:ro
+      - static_data:/static:ro
+      - media_data:/media:ro
+    depends_on:
+      - web
+    restart: unless-stopped
+    networks:
+      - backend
+      - frontend
+
+  # ── Government API Mocks ───────────────────────────────────────────────────
+  ebm_mock:
+    image: python:3.12-slim
+    command: python /mocks/ebm_server.py
+    volumes:
+      - ./docker/mocks:/mocks:ro
+    networks:
+      - backend
+
+  rura_mock:
+    image: python:3.12-slim
+    command: python /mocks/rura_server.py
+    volumes:
+      - ./docker/mocks:/mocks:ro
+    networks:
+      - backend
+
+  # ── Prometheus (metrics scraping) ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - backend
+
+  # ── Grafana (dashboards) ──────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  media_data:
+  static_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge

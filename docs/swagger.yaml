@@ -1,0 +1,609 @@
+openapi: 3.0.3
+info:
+  title: IshemaLink API
+  description: |
+    National Logistics Platform — Rwanda
+    Covers: Auth, Shipments, Payments, Tracking, GovTech, Analytics, Ops.
+    All endpoints require Bearer JWT authentication unless stated otherwise.
+  version: 2.0.0
+  contact:
+    name: IshemaLink Engineering
+    email: dev@ishemalink.rw
+
+servers:
+  - url: https://ishemalink.rw/api
+    description: Production (Rwanda Data Center)
+  - url: http://localhost:8000/api
+    description: Local Development
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    AgentRegister:
+      type: object
+      required: [phone, full_name, password]
+      properties:
+        phone:        { type: string, example: "+250781234567" }
+        full_name:    { type: string, example: "Farmer Joseph" }
+        national_id:  { type: string, example: "1199880012345678", nullable: true }
+        role:
+          type: string
+          enum: [SENDER, DRIVER, EXPORTER, INSPECTOR, ADMIN]
+          default: SENDER
+        district:     { type: string, example: "Nyamagabe" }
+        password:     { type: string, minLength: 8, writeOnly: true }
+
+    LoginRequest:
+      type: object
+      required: [phone, password]
+      properties:
+        phone:    { type: string, example: "+250781234567" }
+        password: { type: string }
+
+    TokenResponse:
+      type: object
+      properties:
+        access:  { type: string, description: "JWT access token (8h)" }
+        refresh: { type: string, description: "JWT refresh token (7d)" }
+
+    AgentProfile:
+      type: object
+      properties:
+        id:          { type: string, format: uuid }
+        phone:       { type: string }
+        full_name:   { type: string }
+        national_id: { type: string, nullable: true }
+        role:        { type: string }
+        district:    { type: string }
+        created_at:  { type: string, format: date-time }
+
+    # ── Shipments ─────────────────────────────────────────────────────────────
+    ShipmentCreate:
+      type: object
+      required: [shipment_type, origin_zone, dest_zone, commodity, weight_kg, declared_value]
+      properties:
+        shipment_type:
+          type: string
+          enum: [DOMESTIC, INTERNATIONAL]
+        origin_zone:        { type: integer, description: "Zone ID" }
+        dest_zone:          { type: integer, description: "Zone ID" }
+        commodity:          { type: integer, description: "Commodity ID" }
+        weight_kg:          { type: number, format: decimal, example: 500.00 }
+        declared_value:     { type: number, format: decimal, example: 100000.00 }
+        destination_country:{ type: string, example: "UG", description: "Required for INTERNATIONAL" }
+        notes:              { type: string }
+        sync_id:            { type: string, description: "Client-side idempotency key for offline sync" }
+        offline_created:    { type: boolean, default: false }
+
+    ShipmentDetail:
+      type: object
+      properties:
+        id:                { type: string, format: uuid }
+        tracking_code:     { type: string, example: "ISH-AB12CD34" }
+        shipment_type:     { type: string, enum: [DOMESTIC, INTERNATIONAL] }
+        status:
+          type: string
+          enum: [DRAFT, CONFIRMED, PAID, ASSIGNED, IN_TRANSIT, AT_BORDER, DELIVERED, CANCELLED, FAILED]
+        sender_name:       { type: string }
+        driver_name:       { type: string, nullable: true }
+        driver_phone:      { type: string, nullable: true }
+        origin_zone:       { $ref: "#/components/schemas/Zone" }
+        dest_zone:         { $ref: "#/components/schemas/Zone" }
+        commodity:         { $ref: "#/components/schemas/Commodity" }
+        weight_kg:         { type: number }
+        declared_value:    { type: number }
+        calculated_tariff: { type: number }
+        vat_amount:        { type: number }
+        total_amount:      { type: number }
+        ebm_receipt_number:{ type: string }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/ShipmentEvent" }
+        created_at:        { type: string, format: date-time }
+        delivered_at:      { type: string, format: date-time, nullable: true }
+
+    ShipmentEvent:
+      type: object
+      properties:
+        from_status:  { type: string }
+        to_status:    { type: string }
+        actor_name:   { type: string, nullable: true }
+        note:         { type: string }
+        occurred_at:  { type: string, format: date-time }
+
+    Zone:
+      type: object
+      properties:
+        id:           { type: integer }
+        name:         { type: string, example: "Kigali Central" }
+        province:     { type: string, example: "Kigali" }
+        base_rate_kg: { type: number, example: 50.00 }
+        is_border:    { type: boolean }
+
+    Commodity:
+      type: object
+      properties:
+        id:           { type: integer }
+        name:         { type: string, example: "Potatoes" }
+        hs_code:      { type: string, example: "0701.90" }
+        is_perishable:{ type: boolean }
+
+    TariffEstimate:
+      type: object
+      properties:
+        base_tariff:  { type: number }
+        surcharge:    { type: number }
+        vat_amount:   { type: number }
+        total_amount: { type: number }
+
+    # ── Payments ──────────────────────────────────────────────────────────────
+    PaymentInitiate:
+      type: object
+      required: [tracking_code, provider, payer_phone]
+      properties:
+        tracking_code: { type: string, example: "ISH-AB12CD34" }
+        provider:
+          type: string
+          enum: [MTN_MOMO, AIRTEL]
+        payer_phone:   { type: string, example: "+250781234567" }
+
+    PaymentInitiateResponse:
+      type: object
+      properties:
+        payment_id:    { type: string, format: uuid }
+        tracking_code: { type: string }
+        amount:        { type: string }
+        currency:      { type: string, example: "RWF" }
+        gateway_ref:   { type: string }
+        status:        { type: string, example: "PENDING" }
+        message:       { type: string }
+
+    WebhookPayload:
+      type: object
+      required: [gateway_ref, status]
+      properties:
+        gateway_ref: { type: string }
+        status:
+          type: string
+          enum: [SUCCESS, FAILED]
+        reason:      { type: string, nullable: true }
+
+    # ── Tracking ──────────────────────────────────────────────────────────────
+    LiveTracking:
+      type: object
+      properties:
+        tracking_code: { type: string }
+        status:        { type: string }
+        driver:        { type: string, nullable: true }
+        vehicle:       { type: string, nullable: true }
+        location:
+          type: object
+          nullable: true
+          properties:
+            lat:       { type: number }
+            lng:       { type: number }
+            last_seen: { type: string, format: date-time }
+
+    # ── GovTech ───────────────────────────────────────────────────────────────
+    EBMSignRequest:
+      type: object
+      required: [payment_id]
+      properties:
+        payment_id: { type: string, format: uuid }
+
+    EBMSignResponse:
+      type: object
+      properties:
+        receipt_number: { type: string, example: "EBM-RW-A1B2C3D4" }
+        signature:      { type: string }
+        fallback:       { type: boolean, description: "True if RRA was unreachable and local sig was used" }
+
+    RURAVerifyResponse:
+      type: object
+      properties:
+        license_number:   { type: string }
+        valid:            { type: boolean }
+        insurance_active: { type: boolean }
+        expiry_date:      { type: string, format: date }
+
+    CustomsManifestRequest:
+      type: object
+      required: [tracking_code]
+      properties:
+        tracking_code: { type: string }
+
+    # ── Analytics ─────────────────────────────────────────────────────────────
+    RouteStats:
+      type: object
+      properties:
+        origin:          { type: string }
+        destination:     { type: string }
+        shipment_count:  { type: integer }
+        total_weight_kg: { type: number }
+
+    CommodityStats:
+      type: object
+      properties:
+        commodity_name:  { type: string }
+        count:           { type: integer }
+        total_weight_kg: { type: number }
+        total_value:     { type: number }
+
+    RevenueHeatmapItem:
+      type: object
+      properties:
+        zone:           { type: string }
+        province:       { type: string }
+        total_revenue:  { type: number }
+        shipment_count: { type: integer }
+
+    DriverLeaderboardItem:
+      type: object
+      properties:
+        driver_name: { type: string }
+        vehicle:     { type: string }
+        deliveries:  { type: integer }
+        total_kg:    { type: number }
+
+    # ── Ops ───────────────────────────────────────────────────────────────────
+    HealthResponse:
+      type: object
+      properties:
+        status:  { type: string, enum: [ok, degraded] }
+        checks:
+          type: object
+          properties:
+            database:      { type: string }
+            redis:         { type: string }
+            disk:          { type: string }
+            disk_free_gb:  { type: number }
+            maintenance:   { type: boolean }
+
+    DashboardSummary:
+      type: object
+      properties:
+        active_trucks_in_transit: { type: integer }
+        today_revenue_rwf:        { type: string }
+        pending_payments:         { type: integer }
+        active_agents:            { type: integer }
+        shipments_by_status:      { type: object }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+tags:
+  - name: Auth
+    description: Registration, login, JWT token management
+  - name: Shipments
+    description: Shipment creation, listing, tariff estimation
+  - name: Payments
+    description: Mobile Money initiation and webhook callbacks
+  - name: Tracking
+    description: Real-time GPS tracking (REST polling + WebSocket)
+  - name: GovTech
+    description: RRA EBM tax receipts and RURA license verification
+  - name: Analytics
+    description: Business intelligence endpoints for MINICOM
+  - name: Admin
+    description: Control Tower dashboard (Admin role only)
+  - name: Ops
+    description: Health checks, metrics, maintenance mode
+
+paths:
+
+  # ── Auth ──────────────────────────────────────────────────────────────────
+  /auth/register/:
+    post:
+      tags: [Auth]
+      summary: Register a new agent
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRegister" }
+      responses:
+        "201": { description: "Account created", content: { application/json: { schema: { type: object, properties: { message: { type: string }, id: { type: string, format: uuid } } } } } }
+        "400": { description: "Validation error" }
+
+  /auth/login/:
+    post:
+      tags: [Auth]
+      summary: Obtain JWT tokens (phone + password)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200": { description: "JWT tokens", content: { application/json: { schema: { $ref: "#/components/schemas/TokenResponse" } } } }
+        "401": { description: "Invalid credentials" }
+
+  /auth/refresh/:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { refresh: { type: string } } }
+      responses:
+        "200": { description: "New access token" }
+
+  /auth/me/:
+    get:
+      tags: [Auth]
+      summary: Get own profile
+      responses:
+        "200": { description: "Agent profile", content: { application/json: { schema: { $ref: "#/components/schemas/AgentProfile" } } } }
+
+  # ── Shipments ─────────────────────────────────────────────────────────────
+  /shipments/create/:
+    post:
+      tags: [Shipments]
+      summary: Create a shipment (Domestic or International)
+      description: |
+        Creates a shipment, calculates tariff atomically, and returns CONFIRMED status.
+        Use `sync_id` for offline-created shipments — duplicate sync_ids are idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShipmentCreate" }
+            examples:
+              domestic:
+                summary: Domestic potato shipment
+                value: { shipment_type: DOMESTIC, origin_zone: 1, dest_zone: 2, commodity: 1, weight_kg: 500, declared_value: 100000 }
+              international:
+                summary: Coffee export to Uganda
+                value: { shipment_type: INTERNATIONAL, origin_zone: 1, dest_zone: 3, commodity: 2, weight_kg: 1000, declared_value: 500000, destination_country: "UG" }
+      responses:
+        "201": { description: "Shipment created", content: { application/json: { schema: { $ref: "#/components/schemas/ShipmentDetail" } } } }
+        "400": { description: "Validation error" }
+        "401": { description: "Unauthorized" }
+
+  /shipments/:
+    get:
+      tags: [Shipments]
+      summary: List shipments (filtered by role)
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: shipment_type, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+      responses:
+        "200": { description: "Paginated shipment list" }
+
+  /shipments/{tracking_code}/:
+    get:
+      tags: [Shipments]
+      summary: Get shipment by tracking code
+      parameters:
+        - { name: tracking_code, in: path, required: true, schema: { type: string, example: "ISH-AB12CD34" } }
+      responses:
+        "200": { description: "Shipment detail", content: { application/json: { schema: { $ref: "#/components/schemas/ShipmentDetail" } } } }
+        "404": { description: "Not found" }
+
+  /tariff/estimate/:
+    post:
+      tags: [Shipments]
+      summary: Estimate tariff before booking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origin_zone, commodity, shipment_type, weight_kg]
+              properties:
+                origin_zone:   { type: integer }
+                commodity:     { type: integer }
+                shipment_type: { type: string, enum: [DOMESTIC, INTERNATIONAL] }
+                weight_kg:     { type: number }
+      responses:
+        "200": { description: "Tariff estimate", content: { application/json: { schema: { $ref: "#/components/schemas/TariffEstimate" } } } }
+
+  # ── Payments ──────────────────────────────────────────────────────────────
+  /payments/initiate/:
+    post:
+      tags: [Payments]
+      summary: Trigger Mobile Money push-to-pay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentInitiate" }
+      responses:
+        "202": { description: "Push sent, awaiting confirmation", content: { application/json: { schema: { $ref: "#/components/schemas/PaymentInitiateResponse" } } } }
+        "404": { description: "Shipment not found or not CONFIRMED" }
+        "409": { description: "Payment already pending" }
+
+  /payments/webhook/:
+    post:
+      tags: [Payments]
+      summary: Receive MoMo payment callback (no auth required)
+      security: []
+      description: |
+        Called by MTN/Airtel Money after user confirms or rejects push.
+        Verified with HMAC-SHA256 signature in X-Momo-Signature header.
+        On SUCCESS: marks payment, triggers EBM signing, assigns driver.
+        On FAILED: cancels shipment booking, notifies sender via SMS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookPayload" }
+      responses:
+        "200": { description: "Callback accepted" }
+        "400": { description: "Invalid payload" }
+        "404": { description: "Unknown gateway_ref" }
+
+  # ── Tracking ──────────────────────────────────────────────────────────────
+  /tracking/{tracking_code}/live/:
+    get:
+      tags: [Tracking]
+      summary: Poll live truck GPS coordinates
+      description: REST polling fallback. For real-time updates use WebSocket at `wss://ishemalink.rw/ws/tracking/{tracking_code}/`
+      parameters:
+        - { name: tracking_code, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "Current location", content: { application/json: { schema: { $ref: "#/components/schemas/LiveTracking" } } } }
+
+  # ── Notifications ─────────────────────────────────────────────────────────
+  /notifications/broadcast/:
+    post:
+      tags: [Admin]
+      summary: Broadcast SMS to all active drivers (Admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { message: { type: string, maxLength: 160 } } }
+      responses:
+        "200": { description: "SMS sent", content: { application/json: { schema: { type: object, properties: { sent_to: { type: integer } } } } } }
+        "403": { description: "Admin only" }
+
+  # ── GovTech ───────────────────────────────────────────────────────────────
+  /gov/ebm/sign-receipt/:
+    post:
+      tags: [GovTech]
+      summary: Request EBM tax receipt signature from RRA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EBMSignRequest" }
+      responses:
+        "200": { description: "EBM receipt signed", content: { application/json: { schema: { $ref: "#/components/schemas/EBMSignResponse" } } } }
+        "404": { description: "Payment not found or not successful" }
+
+  /gov/rura/verify-license/{license_no}/:
+    get:
+      tags: [GovTech]
+      summary: Verify driver transport license with RURA
+      parameters:
+        - { name: license_no, in: path, required: true, schema: { type: string, example: "RW-DRV-001" } }
+      responses:
+        "200": { description: "License verification result", content: { application/json: { schema: { $ref: "#/components/schemas/RURAVerifyResponse" } } } }
+
+  /gov/customs/generate-manifest/:
+    post:
+      tags: [GovTech]
+      summary: Generate EAC-compliant XML customs manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CustomsManifestRequest" }
+      responses:
+        "200": { description: "XML manifest", content: { application/xml: {} } }
+        "404": { description: "International shipment not found" }
+
+  /gov/audit/access-log/:
+    get:
+      tags: [GovTech]
+      summary: Government audit trail (Admin/Inspector only)
+      responses:
+        "200": { description: "Audit events list" }
+        "403": { description: "Insufficient permissions" }
+
+  # ── Analytics ─────────────────────────────────────────────────────────────
+  /analytics/routes/top/:
+    get:
+      tags: [Analytics]
+      summary: Top high-traffic origin→destination corridors
+      responses:
+        "200": { description: "Route stats", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/RouteStats" } } } } }
+
+  /analytics/commodities/breakdown/:
+    get:
+      tags: [Analytics]
+      summary: Cargo type volume breakdown
+      responses:
+        "200": { description: "Commodity stats", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/CommodityStats" } } } } }
+
+  /analytics/revenue/heatmap/:
+    get:
+      tags: [Analytics]
+      summary: Revenue per district (geospatial heatmap data, anonymised)
+      responses:
+        "200": { description: "Revenue heatmap", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/RevenueHeatmapItem" } } } } }
+
+  /analytics/drivers/leaderboard/:
+    get:
+      tags: [Analytics]
+      summary: Top performing drivers by delivery count
+      responses:
+        "200": { description: "Driver leaderboard", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/DriverLeaderboardItem" } } } } }
+
+  /analytics/monthly-summary/:
+    get:
+      tags: [Analytics]
+      summary: Monthly shipment and revenue summary (12 months)
+      responses:
+        "200": { description: "Monthly summary" }
+
+  # ── Admin / Ops ───────────────────────────────────────────────────────────
+  /admin/dashboard/summary/:
+    get:
+      tags: [Admin]
+      summary: Control Tower live overview (Admin only)
+      responses:
+        "200": { description: "Dashboard summary", content: { application/json: { schema: { $ref: "#/components/schemas/DashboardSummary" } } } }
+        "403": { description: "Admin only" }
+
+  /health/deep/:
+    get:
+      tags: [Ops]
+      summary: Deep health check — DB, Redis, disk
+      security: []
+      responses:
+        "200": { description: "Health status", content: { application/json: { schema: { $ref: "#/components/schemas/HealthResponse" } } } }
+
+  /ops/metrics/:
+    get:
+      tags: [Ops]
+      summary: Prometheus-formatted metrics
+      responses:
+        "200": { description: "Prometheus text format metrics", content: { "text/plain": {} } }
+
+  /ops/maintenance/toggle/:
+    post:
+      tags: [Ops]
+      summary: Toggle maintenance mode on/off (Admin only)
+      responses:
+        "200": { description: "Maintenance mode state", content: { application/json: { schema: { type: object, properties: { maintenance: { type: boolean } } } } } }
+        "403": { description: "Admin only" }
+
+  /test/seed/:
+    post:
+      tags: [Ops]
+      summary: Seed database with dummy shipments (DEBUG only)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { count: { type: integer, default: 100 } } }
+      responses:
+        "200": { description: "Seeded", content: { application/json: { schema: { type: object, properties: { seeded: { type: integer } } } } } }
+        "403": { description: "DEBUG mode only" }
+
+  /test/security-health/:
+    get:
+      tags: [Ops]
+      summary: Security configuration health report
+      responses:
+        "200": { description: "Security status flags" }

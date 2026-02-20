@@ -192,7 +192,53 @@ class SeedView(APIView):
         return Response({"seeded": created})
 
 
-# ── GET /api/test/security-health/ ───────────────────────────────────────────
+
+# ── GET /api/test/load-simulation/ ───────────────────────────────────────────
+@extend_schema(tags=["Test"], summary="Trigger internal stress test simulation")
+class LoadSimulationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """
+        Triggers an internal stress test by simulating concurrent tariff calculations.
+        Returns timing results for performance profiling.
+        """
+        if request.user.role != "ADMIN":
+            return Response({"error": "Admin only."}, status=403)
+
+        from apps.shipments.models import Zone, Commodity, Shipment
+        from apps.shipments.service import TariffCalculator
+        import time
+
+        zones       = list(Zone.objects.all()[:2])
+        commodities = list(Commodity.objects.all()[:2])
+        if not zones or not commodities:
+            return Response({"error": "Seed Zones and Commodities first."}, status=400)
+
+        calc   = TariffCalculator()
+        count  = int(request.GET.get("n", 100))
+        start  = time.monotonic()
+        errors = 0
+
+        for i in range(count):
+            try:
+                class Pseudo:
+                    origin_zone   = zones[i % len(zones)]
+                    weight_kg     = Decimal(str(10 + i % 5000))
+                    shipment_type = "DOMESTIC" if i % 2 == 0 else "INTERNATIONAL"
+                    commodity     = commodities[i % len(commodities)]
+                calc.calculate(Pseudo())
+            except Exception:
+                errors += 1
+
+        elapsed_ms = (time.monotonic() - start) * 1000
+        return Response({
+            "iterations":        count,
+            "errors":            errors,
+            "elapsed_ms":        round(elapsed_ms, 2),
+            "avg_ms_per_calc":   round(elapsed_ms / count, 3),
+            "status":            "ok" if errors == 0 else "degraded",
+        })
 @extend_schema(tags=["Test"], summary="Security health report")
 class SecurityHealthView(APIView):
     permission_classes = [IsAuthenticated]

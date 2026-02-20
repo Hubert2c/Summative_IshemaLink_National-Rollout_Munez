@@ -590,3 +590,197 @@ class TestRwandaContextScenarios:
         assert "receipt_number" in result
         assert "signature"       in result
         assert result.get("fallback") is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADDITIONAL TESTS — Analytics, GovTech, Admin
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.django_db
+class TestAnalyticsEndpoints:
+    """Analytics endpoints require ADMIN/INSPECTOR role."""
+
+    def test_top_routes_requires_admin(self, auth_client):
+        resp = auth_client.get("/api/analytics/routes/top/")
+        assert resp.status_code == 403
+
+    def test_admin_can_access_top_routes(self, admin_client):
+        resp = admin_client.get("/api/analytics/routes/top/")
+        assert resp.status_code == 200
+        assert isinstance(resp.data, list)
+
+    def test_commodity_breakdown_returns_list(self, admin_client):
+        resp = admin_client.get("/api/analytics/commodities/breakdown/")
+        assert resp.status_code == 200
+
+    def test_revenue_heatmap_returns_list(self, admin_client):
+        resp = admin_client.get("/api/analytics/revenue/heatmap/")
+        assert resp.status_code == 200
+
+    def test_driver_leaderboard_returns_list(self, admin_client):
+        resp = admin_client.get("/api/analytics/drivers/leaderboard/")
+        assert resp.status_code == 200
+
+    def test_monthly_summary_returns_list(self, admin_client):
+        resp = admin_client.get("/api/analytics/monthly-summary/")
+        assert resp.status_code == 200
+
+
+@pytest.mark.django_db
+class TestGovTechEndpoints:
+    """Government integration endpoints."""
+
+    def test_customs_manifest_requires_international(self, auth_client, zones, commodity, make_agent):
+        from apps.shipments.models import Shipment
+        origin, dest = zones
+        from apps.authentication.models import Agent; sender = Agent.objects.get(phone="+250781000001")
+
+        # Domestic shipment — should fail customs manifest request
+        shipment = Shipment.objects.create(
+            tracking_code="DOM-001", shipment_type=Shipment.Type.DOMESTIC,
+            sender=sender, origin_zone=origin, dest_zone=dest, commodity=commodity,
+            weight_kg=Decimal("100"), declared_value=Decimal("10000"),
+            total_amount=Decimal("5900"),
+        )
+        resp = auth_client.post("/api/gov/customs/generate-manifest/",
+                                {"tracking_code": "DOM-001"}, format="json")
+        assert resp.status_code == 404
+
+    def test_rura_verify_valid_license(self, auth_client):
+        with patch("apps.govtech.connectors.RURAConnector.verify_license", return_value=True):
+            resp = auth_client.get("/api/gov/rura/verify-license/RW-DRV-001/")
+        assert resp.status_code == 200
+        assert resp.data["valid"] is True
+
+    def test_rura_verify_invalid_license(self, auth_client):
+        with patch("apps.govtech.connectors.RURAConnector.verify_license", return_value=False):
+            resp = auth_client.get("/api/gov/rura/verify-license/INVALID-999/")
+        assert resp.status_code == 200
+        assert resp.data["valid"] is False
+
+
+@pytest.mark.django_db
+class TestOpsEndpoints:
+    """Operations and health endpoints."""
+
+    def test_health_deep_accessible_without_auth(self, api_client):
+        resp = api_client.get("/api/health/deep/")
+        assert resp.status_code == 200
+        assert "database" in resp.data["checks"]
+        assert "redis" in resp.data["checks"]
+
+    def test_dashboard_requires_admin(self, auth_client):
+        resp = auth_client.get("/api/admin/dashboard/summary/")
+        assert resp.status_code == 403
+
+    def test_admin_dashboard_returns_summary(self, admin_client):
+        resp = admin_client.get("/api/admin/dashboard/summary/")
+        assert resp.status_code == 200
+        assert "active_trucks_in_transit" in resp.data
+        assert "today_revenue_rwf" in resp.data
+
+    def test_maintenance_toggle_admin_only(self, auth_client):
+        resp = auth_client.post("/api/ops/maintenance/toggle/")
+        assert resp.status_code == 403
+
+    def test_security_health_report(self, auth_client):
+        resp = auth_client.get("/api/test/security-health/")
+        assert resp.status_code == 200
+        assert "debug_mode" in resp.data
+
+
+@pytest.mark.django_db
+class TestShipmentStateFlow:
+    """Test shipment state transitions and validation."""
+
+    def test_international_requires_destination_country(self, auth_client, zones, commodity):
+        origin, dest = zones
+        resp = auth_client.post("/api/shipments/create/", {
+            "shipment_type": "INTERNATIONAL",
+            "origin_zone": origin.id, "dest_zone": dest.id,
+            "commodity": commodity.id,
+            "weight_kg": "100", "declared_value": "50000",
+            # Missing destination_country
+        }, format="json")
+        assert resp.status_code == 400
+        assert "destination_country" in str(resp.data)
+
+    def test_tracking_code_starts_with_ISH(self, auth_client, zones, commodity):
+        origin, dest = zones
+        resp = auth_client.post("/api/shipments/create/", {
+            "shipment_type": "DOMESTIC",
+            "origin_zone": origin.id, "dest_zone": dest.id,
+            "commodity": commodity.id,
+            "weight_kg": "100", "declared_value": "10000",
+        }, format="json")
+        assert resp.status_code == 201
+        assert resp.data["tracking_code"].startswith("ISH-")
+
+    def test_tariff_estimate_returns_breakdown(self, auth_client, zones, commodity):
+        origin, _ = zones
+        resp = auth_client.post("/api/tariff/estimate/", {
+            "origin_zone": origin.id,
+            "commodity": commodity.id,
+            "shipment_type": "DOMESTIC",
+            "weight_kg": "100",
+        }, format="json")
+        assert resp.status_code == 200
+        assert "total_amount" in resp.data
+        assert "vat_amount" in resp.data
+        assert Decimal(resp.data["vat_amount"]) > 0
+
+
+@pytest.mark.django_db
+class TestNotifications:
+    """Notification broadcast endpoint."""
+
+    def test_broadcast_admin_only(self, auth_client):
+        resp = auth_client.post("/api/notifications/broadcast/",
+                                {"message": "Harvest peak alert!"}, format="json")
+        assert resp.status_code == 403
+
+    def test_admin_broadcast_succeeds(self, admin_client):
+        with patch("apps.notifications.service.NotificationService.send_sms", return_value=True):
+            resp = admin_client.post("/api/notifications/broadcast/",
+                                     {"message": "Test broadcast"}, format="json")
+        assert resp.status_code == 200
+        assert "sent_to" in resp.data
+
+
+@pytest.mark.django_db
+class TestRegistrationAndAuth:
+    """User registration and authentication."""
+
+    def test_register_valid_user(self, api_client):
+        resp = api_client.post("/api/auth/register/", {
+            "phone": "+250789000099",
+            "full_name": "Test Farmer",
+            "password": "Secure@2024",
+            "role": "SENDER",
+        }, format="json")
+        assert resp.status_code == 201
+        assert "id" in resp.data
+
+    def test_register_invalid_phone(self, api_client):
+        resp = api_client.post("/api/auth/register/", {
+            "phone": "+1-555-000-0000",
+            "full_name": "Foreign User",
+            "password": "Secure@2024",
+        }, format="json")
+        assert resp.status_code == 400
+
+    def test_login_returns_token(self, api_client, sender):
+        resp = api_client.post("/api/auth/login/", {
+            "phone": sender.phone, "password": "Test@1234"
+        }, format="json")
+        assert resp.status_code == 200
+        assert "access" in resp.data
+
+    def test_profile_requires_auth(self, api_client):
+        resp = api_client.get("/api/auth/me/")
+        assert resp.status_code == 401
+
+    def test_profile_returns_own_data(self, auth_client, sender):
+        resp = auth_client.get("/api/auth/me/")
+        assert resp.status_code == 200
+        assert resp.data["phone"] == sender.phone

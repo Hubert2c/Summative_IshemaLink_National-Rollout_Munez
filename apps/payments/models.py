@@ -102,7 +102,7 @@ class MomoMockAdapter(PaymentGatewayAdapter):
 
     def verify_webhook_signature(self, payload: bytes, signature: str) -> bool:
         """HMAC-SHA256 signature verification."""
-        expected = hmac.new(self.WEBHOOK_SECRET, payload, hashlib.sha256).hexdigest()
+        expected = hmac.new(self.WEBHOOK_SECRET, payload, hashlib.sha256).hexdigest()  # noqa: S324
         return hmac.compare_digest(expected, signature)
 
 

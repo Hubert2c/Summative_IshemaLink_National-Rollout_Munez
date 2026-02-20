@@ -1,11 +1,10 @@
-"""Notification broadcast endpoint."""
+"""Notifications views — Phase 5."""
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import serializers
-from drf_spectacular.utils import extend_schema
-from apps.notifications.service import NotificationService
+from .service import NotificationService
 
 notifier = NotificationService()
 
@@ -14,8 +13,8 @@ class BroadcastSerializer(serializers.Serializer):
     message = serializers.CharField(max_length=160)
 
 
-@extend_schema(tags=["Notifications"], summary="Broadcast SMS to all active drivers (Admin only)")
 class BroadcastView(APIView):
+    """POST /api/notifications/broadcast/ — Admin only"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):

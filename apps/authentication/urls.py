@@ -3,8 +3,10 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import RegisterView, ProfileView
 
 urlpatterns = [
-    path("register/", RegisterView.as_view(),       name="auth-register"),
-    path("login/",    TokenObtainPairView.as_view(), name="auth-login"),
-    path("refresh/",  TokenRefreshView.as_view(),    name="auth-refresh"),
-    path("me/",       ProfileView.as_view(),          name="auth-profile"),
+    path("register/", RegisterView.as_view(),        name="auth-register"),
+    path("login/",    TokenObtainPairView.as_view(),  name="auth-login"),
+    path("refresh/",  TokenRefreshView.as_view(),     name="auth-refresh"),
+    path("me/",       ProfileView.as_view(),           name="auth-profile"),
+    # TODO Phase 3: password reset endpoints
+    # path("password-reset/", PasswordResetView.as_view()),
 ]

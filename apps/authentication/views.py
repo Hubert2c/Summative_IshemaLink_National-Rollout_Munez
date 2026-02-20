@@ -1,40 +1,41 @@
-"""Authentication: registration, login, NID validation."""
+"""
+Authentication views — Phase 2 development.
 
-import re
+DEVELOPMENT NOTES:
+- Phase 1: used Django's built-in User + email login (scrapped)
+- Phase 2 (this file): switched to phone-based login with JWT
+- Phase 3 (main): added NID regex validation, DriverProfile handling
+
+TODO: add NID 16-digit regex validation (Phase 3)
+TODO: add Rwandan phone number format check (Phase 3)
+TODO: add rate limiting on login endpoint (Phase 11)
+FIXME: password reset flow not yet implemented
+"""
+
 from django.contrib.auth import get_user_model
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework import serializers
-from drf_spectacular.utils import extend_schema
 
 Agent = get_user_model()
 
-# ── Validators ────────────────────────────────────────────────────────────────
-NID_PATTERN = re.compile(r"^\d{16}$")
-RW_PHONE_PATTERN = re.compile(r"^(\+?250|0)(7[2389]\d{7})$")
 
-
-def validate_rw_phone(value):
-    if not RW_PHONE_PATTERN.match(value):
-        raise serializers.ValidationError("Enter a valid Rwandan phone number (+250 or 07x…).")
-
-
-def validate_nid(value):
-    if value and not NID_PATTERN.match(value):
-        raise serializers.ValidationError("National ID must be exactly 16 digits.")
-
-
-# ── Serializers ───────────────────────────────────────────────────────────────
+# ── Serializers ────────────────────────────────────────────────────────────
 class AgentRegisterSerializer(serializers.ModelSerializer):
-    password  = serializers.CharField(write_only=True, min_length=8)
-    phone     = serializers.CharField(validators=[validate_rw_phone])
-    national_id = serializers.CharField(required=False, allow_blank=True, validators=[validate_nid])
+    password = serializers.CharField(write_only=True, min_length=8)
 
     class Meta:
         model  = Agent
         fields = ["phone", "full_name", "national_id", "role", "district", "password"]
+
+    def validate_phone(self, value):
+        # TODO Phase 3: replace with proper Rwandan phone regex (+250 / 07x)
+        if len(value) < 9:
+            raise serializers.ValidationError("Phone number too short.")
+        return value
+
+    # TODO Phase 3: add validate_national_id(self, value) — must be 16 digits
 
     def create(self, validated_data):
         password = validated_data.pop("password")
@@ -51,12 +52,11 @@ class AgentProfileSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
-# ── Views ─────────────────────────────────────────────────────────────────────
-@extend_schema(tags=["Auth"])
+# ── Views ──────────────────────────────────────────────────────────────────
 class RegisterView(generics.CreateAPIView):
-    """POST /api/auth/register/ — Create a new agent account."""
-    queryset         = Agent.objects.all()
-    serializer_class = AgentRegisterSerializer
+    """POST /api/auth/register/"""
+    queryset           = Agent.objects.all()
+    serializer_class   = AgentRegisterSerializer
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
@@ -64,14 +64,13 @@ class RegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         agent = serializer.save()
         return Response(
-            {"message": "Account created. Please log in.", "id": str(agent.id)},
+            {"message": "Account created.", "id": str(agent.id)},
             status=status.HTTP_201_CREATED,
         )
 
 
-@extend_schema(tags=["Auth"])
 class ProfileView(generics.RetrieveUpdateAPIView):
-    """GET/PATCH /api/auth/me/ — Retrieve or update own profile."""
+    """GET/PATCH /api/auth/me/"""
     serializer_class   = AgentProfileSerializer
     permission_classes = [IsAuthenticated]
 

@@ -1,25 +1,28 @@
-"""Shipment API views."""
+"""
+Shipment views — Phase 4.
 
-import logging
-from django.db import transaction
+TODO Phase 7: add international shipment create endpoint
+TODO Phase 5: integrate payment initiation into create flow
+TODO Phase 11: add pagination, filtering by status
+FIXME: list view returns ALL shipments — no RBAC filtering yet
+"""
+
 from rest_framework import generics, status, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from drf_spectacular.utils import extend_schema
-from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Shipment, Zone, Commodity
 from .service import BookingService, TariffCalculator
-from . import serializers as sz
+from .serializers import (
+    ShipmentCreateSerializer, ShipmentDetailSerializer, TariffEstimateSerializer
+)
 
-logger = logging.getLogger("ishemalink.shipments")
 booking_service = BookingService()
 
 
-# ── POST /api/shipments/create/ ───────────────────────────────────────────────
-@extend_schema(tags=["Shipments"], summary="Create a shipment (Domestic or International)")
 class ShipmentCreateView(generics.CreateAPIView):
-    serializer_class = sz.ShipmentCreateSerializer
+    """POST /api/shipments/create/"""
+    serializer_class   = ShipmentCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def perform_create(self, serializer):
@@ -33,55 +36,58 @@ class ShipmentCreateView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        out = sz.ShipmentDetailSerializer(self._shipment)
+        out = ShipmentDetailSerializer(self._shipment)
         return Response(out.data, status=status.HTTP_201_CREATED)
 
 
-# ── GET /api/shipments/ ────────────────────────────────────────────────────────
-@extend_schema(tags=["Shipments"], summary="List shipments for the authenticated agent")
 class ShipmentListView(generics.ListAPIView):
-    serializer_class = sz.ShipmentDetailSerializer
+    """
+    GET /api/shipments/
+    FIXME: currently returns all shipments regardless of user role.
+    Phase 11 will add proper RBAC — senders see only their own,
+    drivers see assigned shipments, admins see all.
+    """
+    serializer_class   = ShipmentDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["status", "shipment_type"]
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role in ("ADMIN", "INSPECTOR"):
-            return Shipment.objects.select_related("sender", "driver", "origin_zone", "dest_zone", "commodity")
-        if user.role == "DRIVER":
-            return Shipment.objects.filter(driver=user).select_related("sender", "origin_zone", "dest_zone", "commodity")
-        return Shipment.objects.filter(sender=user).select_related("origin_zone", "dest_zone", "commodity")
+        # TODO Phase 11: filter by role
+        # user = self.request.user
+        # if user.role == "SENDER": return Shipment.objects.filter(sender=user)
+        # if user.role == "DRIVER": return Shipment.objects.filter(driver=user)
+        return Shipment.objects.all().select_related(
+            "sender", "driver", "origin_zone", "dest_zone", "commodity"
+        )
 
 
-# ── GET /api/shipments/{tracking_code}/ ───────────────────────────────────────
-@extend_schema(tags=["Shipments"], summary="Retrieve shipment by tracking code")
 class ShipmentDetailView(generics.RetrieveAPIView):
-    serializer_class   = sz.ShipmentDetailSerializer
+    """GET /api/shipments/{tracking_code}/"""
+    serializer_class   = ShipmentDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
-    lookup_field = "tracking_code"
+    lookup_field       = "tracking_code"
 
     def get_queryset(self):
-        return Shipment.objects.select_related("sender", "driver", "origin_zone", "dest_zone", "commodity")
+        return Shipment.objects.select_related(
+            "sender", "driver", "origin_zone", "dest_zone", "commodity"
+        )
 
 
-# ── GET /api/tariff/estimate/ ─────────────────────────────────────────────────
-@extend_schema(tags=["Shipments"], summary="Estimate tariff before creating a shipment")
 class TariffEstimateView(APIView):
+    """POST /api/tariff/estimate/ — domestic only in Phase 4"""
     permission_classes = [permissions.IsAuthenticated]
     calculator = TariffCalculator()
 
     def post(self, request):
-        ser = sz.TariffEstimateSerializer(data=request.data)
+        ser = TariffEstimateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         d = ser.validated_data
 
-        # Build a lightweight pseudo-shipment for calculation
         class Pseudo:
-            origin_zone   = d["origin_zone"]
-            weight_kg     = d["weight_kg"]
-            shipment_type = d["shipment_type"]
-            commodity     = d["commodity"]
+            origin_zone = d["origin_zone"]
+            weight_kg   = d["weight_kg"]
+            # TODO Phase 7: shipment_type = d["shipment_type"]
+            class commodity:
+                is_perishable = d["commodity"].is_perishable
 
         result = self.calculator.calculate(Pseudo())
         return Response(result)

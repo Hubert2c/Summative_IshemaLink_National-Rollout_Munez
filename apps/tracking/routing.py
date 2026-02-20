@@ -1,4 +1,3 @@
-"""WebSocket URL routing for tracking."""
 from django.urls import re_path
 from .consumers import TrackingConsumer
 

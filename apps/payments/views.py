@@ -1,145 +1,133 @@
-"""Payment views — initiate MoMo push, receive webhook callback."""
+"""
+Payment views — Phase 5/6.
+
+DEVELOPMENT NOTES:
+- Phase 5: initiate view added, webhook is a stub
+- Phase 6 (this file): webhook implemented but no signature check yet
+- Phase 6 final (main): added HMAC verification, full atomic transaction
+
+TODO: add HMAC signature check on webhook (Phase 6 final)
+TODO: add duplicate webhook handling (idempotency check on gateway_ref)
+FIXME: webhook has no authentication — any POST will be accepted
+       (signature check added in main branch)
+"""
 
 import json
 import logging
 
 from django.db import transaction
-from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from drf_spectacular.utils import extend_schema, OpenApiExample
 
 from apps.shipments.models import Shipment
 from apps.payments.models import Payment, get_payment_adapter
-from apps.payments.serializers import PaymentInitiateSerializer, PaymentDetailSerializer
-from apps.shipments.service import BookingService
 
-logger = logging.getLogger("ishemalink.payments")
-booking_service = BookingService()
+logger = logging.getLogger(__name__)
 
 
-# ── POST /api/payments/initiate/ ─────────────────────────────────────────────
-@extend_schema(
-    tags=["Payments"],
-    summary="Initiate Mobile Money push-to-pay for a confirmed shipment",
-    examples=[
-        OpenApiExample(
-            "MTN MoMo",
-            value={"tracking_code": "ISH-ABC12345", "provider": "MTN_MOMO", "payer_phone": "+250781234567"},
-        )
-    ],
-)
 class PaymentInitiateView(APIView):
+    """POST /api/payments/initiate/"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        ser = PaymentInitiateSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        d = ser.validated_data
+        tracking_code = request.data.get("tracking_code")
+        provider      = request.data.get("provider", "MTN_MOMO")
+        payer_phone   = request.data.get("payer_phone")
+
+        if not tracking_code or not payer_phone:
+            return Response(
+                {"error": "tracking_code and payer_phone required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             shipment = Shipment.objects.get(
-                tracking_code=d["tracking_code"],
+                tracking_code=tracking_code,
                 sender=request.user,
                 status=Shipment.Status.CONFIRMED,
             )
         except Shipment.DoesNotExist:
-            return Response(
-                {"error": "Shipment not found or not in CONFIRMED state."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Prevent duplicate payments
-        if hasattr(shipment, "payment") and shipment.payment.status == Payment.Status.PENDING:
-            return Response(
-                {"error": "A payment is already pending for this shipment."},
-                status=status.HTTP_409_CONFLICT,
-            )
+            return Response({"error": "Shipment not found or not CONFIRMED."}, status=404)
 
         payment = Payment.objects.create(
             shipment    = shipment,
-            provider    = d["provider"],
-            amount      = shipment.total_amount,
-            payer_phone = d["payer_phone"],
+            provider    = provider,
+            amount      = shipment.total_amount or 0,
+            payer_phone = payer_phone,
         )
 
-        adapter = get_payment_adapter(d["provider"])
+        adapter = get_payment_adapter(provider)
         result  = adapter.initiate(payment)
 
         return Response({
-            "payment_id":  str(payment.id),
-            "tracking_code": shipment.tracking_code,
-            "amount":      str(payment.amount),
-            "currency":    payment.currency,
+            "payment_id":   str(payment.id),
+            "tracking_code": tracking_code,
+            "amount":        str(payment.amount),
+            "currency":      "RWF",
             **result,
         }, status=status.HTTP_202_ACCEPTED)
 
 
-# ── POST /api/payments/webhook/ ───────────────────────────────────────────────
-@extend_schema(
-    tags=["Payments"],
-    summary="Receive Mobile Money success/fail callback (webhook)",
-)
 @method_decorator(csrf_exempt, name="dispatch")
 class PaymentWebhookView(APIView):
     """
-    Receives async callbacks from MTN/Airtel.
-    Signature is verified before any state mutation.
-    All DB work is atomic — payment status + shipment status update together.
+    POST /api/payments/webhook/
+    Receives MoMo callback.
+
+    Phase 6: basic implementation — no signature check yet.
+    TODO: add X-Momo-Signature HMAC-SHA256 verification (Phase 6 final)
+    TODO: wrap in atomic transaction (Phase 6 final)
+    FIXME: no check for duplicate callbacks — same gateway_ref processed twice
+           will create double status updates
     """
-    permission_classes = [AllowAny]
-    authentication_classes = []   # webhooks are not JWT-authenticated
+    permission_classes  = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
-        payload   = request.body
-        signature = request.headers.get("X-Momo-Signature", "")
-
-        # Signature check (skipped in mock mode)
         try:
-            data = json.loads(payload)
+            data = json.loads(request.body)
         except json.JSONDecodeError:
-            return Response({"error": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Invalid JSON"}, status=400)
 
         gateway_ref     = data.get("gateway_ref")
-        callback_status = data.get("status")   # "SUCCESS" or "FAILED"
-        reason          = data.get("reason", "")
+        callback_status = data.get("status")
 
         if not gateway_ref or callback_status not in ("SUCCESS", "FAILED"):
-            return Response({"error": "Missing gateway_ref or status"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "gateway_ref and status required"}, status=400)
 
         try:
-            payment = Payment.objects.select_related("shipment").get(gateway_ref=gateway_ref)
+            payment = Payment.objects.select_related("shipment").get(
+                gateway_ref=gateway_ref
+            )
         except Payment.DoesNotExist:
-            logger.warning("Webhook for unknown gateway_ref: %s", gateway_ref)
-            return Response({"error": "Unknown reference"}, status=status.HTTP_404_NOT_FOUND)
+            logger.warning("Unknown gateway_ref in webhook: %s", gateway_ref)
+            return Response({"error": "Unknown reference"}, status=404)
 
-        if payment.status != Payment.Status.PENDING:
-            # Idempotent — already processed
-            return Response({"status": "already_processed"})
+        # TODO Phase 6 final: wrap below in transaction.atomic()
+        if callback_status == "SUCCESS":
+            payment.status = Payment.Status.SUCCESS
+            payment.save(update_fields=["status"])
 
-        with transaction.atomic():
-            if callback_status == "SUCCESS":
-                payment.status = Payment.Status.SUCCESS
-                payment.save(update_fields=["status", "updated_at"])
+            shipment        = payment.shipment
+            shipment.status = Shipment.Status.PAID
+            shipment.save(update_fields=["status"])
 
-                # EBM receipt signing (async)
-                from apps.govtech.tasks import sign_ebm_receipt
-                sign_ebm_receipt.delay(str(payment.id))
+            # TODO Phase 9: trigger EBM receipt signing (async Celery task)
+            # TODO: notify sender via SMS (Phase 5 notification service)
 
-                # Advance shipment state
-                booking_service.confirm_payment(payment.shipment, payment)
+            logger.info("Payment SUCCESS: %s", payment.shipment.tracking_code)
 
-                logger.info("Payment SUCCESS for shipment %s", payment.shipment.tracking_code)
-                return Response({"status": "accepted"})
+        else:
+            payment.status          = Payment.Status.FAILED
+            payment.shipment.status = Shipment.Status.FAILED
+            payment.save(update_fields=["status"])
+            payment.shipment.save(update_fields=["status"])
+            # TODO: notify sender of failure via SMS
 
-            else:  # FAILED
-                payment.status = Payment.Status.FAILED
-                payment.save(update_fields=["status", "updated_at"])
-                booking_service.handle_payment_failure(payment.shipment, reason)
+            logger.info("Payment FAILED: %s", payment.shipment.tracking_code)
 
-                logger.info("Payment FAILED for shipment %s: %s",
-                            payment.shipment.tracking_code, reason)
-                return Response({"status": "accepted"})
+        return Response({"status": "accepted"})

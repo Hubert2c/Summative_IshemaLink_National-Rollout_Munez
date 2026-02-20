@@ -1,0 +1,28 @@
+# IshemaLink — Development Dependencies
+# Lighter than production (no gunicorn, channels, prometheus, etc.)
+# Install: pip install -r requirements_dev.txt
+
+# Core Django
+Django==5.0.4
+djangorestframework==3.15.1
+djangorestframework-simplejwt==5.3.1
+django-filter==24.2
+django-cors-headers==4.3.1
+
+# OpenAPI docs (browsable in dev)
+drf-spectacular==0.27.2
+
+# Testing
+pytest==8.2.0
+pytest-django==4.8.0
+pytest-cov==5.0.0
+
+# Dev tools
+ipython==8.24.0           # nicer shell: python manage.py shell
+django-extensions==3.2.3  # graph_models, shell_plus, etc.
+
+# Load testing (run separately)
+# locust==2.29.0
+
+# Security scanning
+bandit==1.7.8

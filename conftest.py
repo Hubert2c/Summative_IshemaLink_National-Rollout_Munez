@@ -1,15 +1,10 @@
-"""
-pytest configuration for IshemaLink.
-Sets Django settings and provides shared fixtures.
-"""
+"""pytest config for dev branch — uses SQLite in-memory."""
 
-import django
 import pytest
 from django.conf import settings
 
 
 def pytest_configure(config):
-    """Configure Django settings before tests run."""
     if not settings.configured:
         settings.configure(
             DATABASES={
@@ -44,22 +39,17 @@ def pytest_configure(config):
                 "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
                 "PAGE_SIZE": 50,
             },
-            SECRET_KEY="test-secret-key-not-for-production",
+            SECRET_KEY="dev-test-secret",
             DEBUG=True,
             USE_TZ=True,
             TIME_ZONE="Africa/Kigali",
             ROOT_URLCONF="ishemalink.urls",
             DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
-            # Dummy external service URLs (mocked in tests)
             RRA_EBM_BASE_URL="http://ebm-mock:8001",
             RURA_API_BASE_URL="http://rura-mock:8002",
             SMS_GATEWAY_URL="http://sms-mock:8003",
             MTN_MOMO_BASE_URL="http://momo-mock",
             AIRTEL_MONEY_BASE_URL="http://airtel-mock",
-            CACHES={
-                "default": {
-                    "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-                }
-            },
+            CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
             MAINTENANCE_MODE=False,
         )
